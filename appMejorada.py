@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import plotly.express as px
 from io import BytesIO
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
@@ -78,7 +79,7 @@ with tab1:
     # INTERPRETACIÓN GENERAL
     # ==================================================
     with st.expander("📖 ¿Qué son los métodos de pronóstico simple?", expanded=False):
-        st.markdown("""
+        st.markdown(r"""
         Los **métodos de pronóstico simple** son técnicas básicas que predicen valores futuros basándose únicamente en el comportamiento pasado de la variable. 
         No requieren variables explicativas externas, solo la serie histórica.
         
@@ -89,27 +90,21 @@ with tab1:
         
         **Fórmula general:**
         $$
-        \\hat{y}_{t+h} = f(y_t, y_{t-1}, \\dots, y_{t-n})
+        \hat{y}_{t+h} = f(y_t, y_{t-1}, \dots, y_{t-n})
         $$
-        Donde $h$ es el horizonte de pronóstico y $n$ es el número de observaciones pasadas consideradas.
+        Donde $h$ es el horizonte de pronóstico.
         """)
 
-    # Detección de columna temporal
+    # Detección de columna temporal (opcional)
     columnas_fecha = [col for col in df.columns if col.lower() in ['work_year','year','año','fecha','date','tiempo']]
     usar_columna_fecha = st.checkbox("Usar columna temporal para ordenar", value=len(columnas_fecha)>0)
     if usar_columna_fecha and columnas_fecha:
         col_tiempo = st.selectbox("Selecciona columna de tiempo", columnas_fecha)
         df_temp = df.sort_values(by=col_tiempo).reset_index(drop=True)
         st.success(f"Ordenado por {col_tiempo}")
-        usar_etiquetas = st.checkbox("Mostrar etiquetas de tiempo en el eje X", value=True)
-        if usar_etiquetas:
-            etiquetas_x = df_temp[col_tiempo].astype(str).tolist()
-        else:
-            etiquetas_x = None
     else:
         df_temp = df.reset_index(drop=True)
         st.info("No se usó columna temporal. Se respeta el orden de filas.")
-        etiquetas_x = None
 
     # Variable objetivo
     if variable_objetivo not in df_temp.columns:
@@ -120,17 +115,27 @@ with tab1:
         st.error("Serie muy corta (<3 observaciones).")
         st.stop()
 
-    # División entrenamiento/prueba
-    test_size = st.slider("Porcentaje de datos para prueba", 0.1, 0.5, 0.2, 0.05)
-    split = max(1, int(len(y_ts) * (1 - test_size)))
+    # ==================================================
+    # HORIZONTE FIJO (número de pasos a pronosticar)
+    # ==================================================
+    max_horizon = len(y_ts) - 1  # al menos 1 dato para entrenamiento
+    horizon = st.number_input("Número de pasos a pronosticar (horizonte)", 
+                              min_value=1, max_value=max_horizon, 
+                              value=min(5, max_horizon), step=1)
+    
+    # Dividir: entrenamiento = todos excepto los últimos 'horizon' valores; prueba = esos últimos
+    split = len(y_ts) - horizon
+    if split < 1:
+        st.error("El horizonte es demasiado grande. Reduce el número de pasos.")
+        st.stop()
     train, test = y_ts[:split], y_ts[split:]
 
     col1, col2 = st.columns(2)
     col1.metric("📊 Entrenamiento", len(train))
-    col2.metric("🔮 Prueba", len(test))
+    col2.metric("🔮 Prueba (valores reales para comparar)", len(test))
 
     # ==================================================
-    # DEFINICIÓN DE MÉTODOS CON SUS FÓRMULAS
+    # FÓRMULAS Y FUNCIONES DE PRONÓSTICO
     # ==================================================
     with st.expander("📐 Fórmulas de los métodos de pronóstico", expanded=False):
         st.markdown(r"""
@@ -138,36 +143,27 @@ with tab1:
         $$
         \hat{y}_{t+1} = y_t
         $$
-        **Explicación:** El pronóstico para cualquier periodo futuro es igual al último valor observado.  
-        **Cuándo usar:** Series sin tendencia ni estacionalidad, con comportamiento errático.
+        **Explicación:** El pronóstico para cualquier periodo futuro es igual al último valor observado.
 
         ### 2. Método de la Deriva
         $$
         \hat{y}_{t+h} = y_t + h \cdot \frac{y_t - y_1}{t-1}
         $$
-        **Explicación:** Proyecta la tendencia promedio observada entre el primer y último valor histórico.  
-        **Cuándo usar:** Series con tendencia lineal clara.
 
-        ### 3. Método de la Media Móvil Simple (ventana \(k\))
+        ### 3. Media Móvil Simple (ventana \(k\))
         $$
         \hat{y}_{t+1} = \frac{y_t + y_{t-1} + \dots + y_{t-k+1}}{k}
         $$
-        **Explicación:** Promedia los últimos \(k\) valores y repite ese promedio hacia el futuro.  
-        **Cuándo usar:** Series con fluctuaciones aleatorias pero sin tendencia fuerte.
 
         ### 4. Método de la Media
         $$
         \hat{y}_{t+h} = \frac{1}{n}\sum_{i=1}^{n} y_i
         $$
-        **Explicación:** El pronóstico es el promedio de toda la serie histórica.  
-        **Cuándo usar:** Series estacionarias sin tendencia ni estacionalidad.
 
-        ### 5. Método Ingenuo Estacional (período \(f\))
+        ### 5. Ingenuo Estacional (período \(f\))
         $$
         \hat{y}_{t+h} = y_{t+h-f}
         $$
-        **Explicación:** Repite el patrón observado \(f\) periodos atrás.  
-        **Cuándo usar:** Series con fuerte componente estacional (ej. demanda eléctrica por días de la semana).
         """)
 
     # Funciones de pronóstico
@@ -203,11 +199,12 @@ with tab1:
             forecasts.append(train[idx])
         return np.array(forecasts)
 
-    # Controles
+    # Parámetros
     window_ma = st.slider("Ventana media móvil", 1, min(10, len(train)), 3)
-    season = st.number_input("Período estacional (días, semanas, etc.)", min_value=1, max_value=len(train), value=min(7, len(train)), step=1)
+    season = st.number_input("Período estacional", min_value=1, max_value=len(train), 
+                             value=min(7, len(train)), step=1)
 
-    steps = len(test)
+    steps = len(test)  # horizonte
     pred_naive = naive(train, steps)
     pred_drift = drift(train, steps)
     pred_ma = moving_average(train, steps, window_ma)
@@ -230,17 +227,13 @@ with tab1:
 
     with st.expander("📖 Interpretación de la tabla de pronósticos", expanded=False):
         st.markdown(f"""
-        Esta tabla muestra los **valores estimados** para cada período futuro (del 1 al {steps}) según cada método.
-        
-        - **Periodo 1** = siguiente valor inmediato después del entrenamiento.
-        - **Periodo {steps}** = último valor del horizonte de prueba.
-        
-        **Comparación con la realidad:** Los valores reales de prueba (no mostrados en la tabla) se usan para calcular los errores. 
-        Un buen método tendrá valores cercanos a esos valores reales.
+        Esta tabla muestra los **valores estimados** para cada uno de los {steps} periodos futuros.
+        - **Periodo 1** = siguiente valor después del entrenamiento.
+        - Puedes comparar estos valores con los reales de prueba (si existen) en las métricas de error.
         """)
 
     # ==================================================
-    # MÉTRICAS DE ERROR
+    # MÉTRICAS DE ERROR (solo si hay valores de prueba)
     # ==================================================
     def mae(y_true, y_pred): return np.mean(np.abs(y_true - y_pred))
     def rmse(y_true, y_pred): return np.sqrt(np.mean((y_true - y_pred)**2))
@@ -256,28 +249,16 @@ with tab1:
         "MAPE (%)": [mape(test, pred_naive), mape(test, pred_drift), mape(test, pred_ma), mape(test, pred_mean), mape(test, pred_seasonal)]
     }).round(2)
 
-    st.subheader("📊 Comparación de errores")
+    st.subheader("📊 Comparación de errores (contra valores reales de prueba)")
     st.dataframe(resultados, use_container_width=True)
 
     with st.expander("📖 Interpretación de las métricas de error", expanded=False):
         st.markdown(r"""
-        ### MAE (Error Absoluto Medio)
-        $$
-        MAE = \frac{1}{n}\sum_{i=1}^{n} |y_i - \hat{y}_i|
-        $$
-        **Interpretación:** Promedio de los errores absolutos. Mide la magnitud promedio del error en las mismas unidades que la variable original. **Menor es mejor.**
+        **MAE** (Error Absoluto Medio): Promedio de errores absolutos.  
+        **RMSE** (Raíz del Error Cuadrático Medio): Penaliza errores grandes.  
+        **MAPE** (Error Porcentual Absoluto Medio): Error relativo en %.
 
-        ### RMSE (Raíz del Error Cuadrático Medio)
-        $$
-        RMSE = \sqrt{\frac{1}{n}\sum_{i=1}^{n} (y_i - \hat{y}_i)^2}
-        $$
-        **Interpretación:** Penaliza más los errores grandes (porque los eleva al cuadrado). Útil cuando los errores grandes son especialmente indeseables. **Menor es mejor.**
-
-        ### MAPE (Error Porcentual Absoluto Medio)
-        $$
-        MAPE = \frac{100\%}{n}\sum_{i=1}^{n} \left|\frac{y_i - \hat{y}_i}{y_i}\right|
-        $$
-        **Interpretación:** Error relativo en porcentaje. Es independiente de la escala de los datos. **Menor es mejor.
+        Menor valor significa mejor pronóstico.
         """)
 
     # ==================================================
@@ -289,114 +270,98 @@ with tab1:
     tiempo_train = list(range(len(train)))
     tiempo_test = list(range(len(train), len(train)+steps))
 
-    # ---- GRÁFICO PRINCIPAL ----
+    # ---- GRÁFICO PRINCIPAL (optimizado para muchos datos) ----
     st.subheader("📈 Pronóstico global (interactivo)")
     st.markdown("**Pasa el mouse sobre cualquier línea o punto para ver su valor exacto.**")
 
-    fig_main = go.Figure()
-    # Entrenamiento (valores reales históricos)
-    fig_main.add_trace(go.Scatter(
-        x=tiempo_train, y=train,
-        mode='lines+markers', name='📊 Entrenamiento (real)',
-        line=dict(color='blue', width=2), marker=dict(size=6),
-        hovertemplate='Periodo: %{x}<br>Valor real: %{y:.2f}<extra></extra>'
-    ))
-
-    # Métodos de pronóstico
-    metodos_plot = [
-        (pred_naive, "Ingenuo", 'green', 'dash', '🔮 Ingenuo: repite último valor'),
-        (pred_drift, "Deriva", 'orange', 'dashdot', '📈 Deriva: extiende tendencia'),
-        (pred_ma, f"Media móvil (w={window_ma})", 'red', 'dot', f'📊 Media móvil: promedio últimos {window_ma} valores'),
-        (pred_mean, "Media", 'purple', 'solid', '⚖️ Media: promedio histórico total'),
-        (pred_seasonal, f"Ing. Estacional (f={season})", 'brown', 'longdash', f'🔄 Estacional: repite patrón de hace {season} periodos')
-    ]
-    for pred, nombre, color, dash, hover_desc in metodos_plot:
+    # Contenedor con scroll vertical (altura fija de 500px)
+    with st.container(height=500):
+        fig_main = go.Figure()
+        # Entrenamiento: línea más fina, puntos más pequeños y semitransparentes
         fig_main.add_trace(go.Scatter(
-            x=tiempo_test, y=pred,
-            mode='lines+markers', name=nombre,
-            line=dict(color=color, width=2, dash=dash), marker=dict(size=6, symbol='x'),
-            hovertemplate=f'{hover_desc}<br>Periodo: %{{x}}<br>Valor pronosticado: %{{y:.2f}}<extra></extra>'
+            x=tiempo_train, y=train,
+            mode='lines+markers', name='📊 Entrenamiento (real)',
+            line=dict(color='blue', width=1.5),
+            marker=dict(size=3, opacity=0.6),
+            hovertemplate='Periodo: %{x}<br>Valor real: %{y:.2f}<extra></extra>'
         ))
 
-    fig_main.update_layout(
-        title=f"Pronósticos vs Entrenamiento - {variable_objetivo}",
-        xaxis_title="Índice temporal",
-        yaxis_title=variable_objetivo,
-        hovermode="closest",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-    st.plotly_chart(fig_main, use_container_width=True)
+        # Métodos
+        metodos_plot = [
+            (pred_naive, "Ingenuo", 'green', 'dash'),
+            (pred_drift, "Deriva", 'orange', 'dashdot'),
+            (pred_ma, f"Media móvil (w={window_ma})", 'red', 'dot'),
+            (pred_mean, "Media", 'purple', 'solid'),
+            (pred_seasonal, f"Ing. Estacional (f={season})", 'brown', 'longdash')
+        ]
+        for pred, nombre, color, dash in metodos_plot:
+            fig_main.add_trace(go.Scatter(
+                x=tiempo_test, y=pred,
+                mode='lines+markers', name=nombre,
+                line=dict(color=color, width=1.5, dash=dash),
+                marker=dict(size=4, symbol='x', opacity=0.7),
+                hovertemplate=f'{nombre}<br>Periodo: %{{x}}<br>Valor: %{{y:.2f}}<extra></extra>'
+            ))
 
-    with st.expander("📖 Interpretación del gráfico principal", expanded=False):
-        st.markdown(f"""
-        ### Elementos del gráfico:
+        fig_main.update_layout(
+            title=f"Pronósticos vs Entrenamiento - {variable_objetivo}",
+            xaxis_title="Índice temporal",
+            yaxis_title=variable_objetivo,
+            hovermode="closest",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        # Cambiamos use_container_width por width='stretch' (nueva sintaxis)
+        st.plotly_chart(fig_main, width='stretch')
 
-        - **Línea azul (Entrenamiento):** Son los **valores reales históricos** usados para "aprender" el comportamiento de la serie.
-        - **Líneas de colores (Métodos):** Representan los **pronósticos** para el periodo de prueba.
-        - **Puntos marcados:** Cada punto es un valor específico (real o pronosticado).
-        
-        ### ¿Cómo evaluar visualmente?
-        - Un buen método tendrá su línea **cerca de los valores reales** de prueba (aunque no se dibujen, puedes comparar con la tendencia del entrenamiento).
-        - Si la serie tiene **tendencia creciente/ decreciente**, la Deriva suele funcionar mejor.
-        - Si la serie es **estable**, la Media o Media Móvil pueden ser adecuadas.
-        - Si hay **patrones repetitivos**, el método Estacional es el indicado.
-        """)
-
-    # ---- GRÁFICAS INDIVIDUALES ----
+    # ---- GRÁFICAS INDIVIDUALES (suavizadas) ----
     st.subheader("📉 Gráficas individuales (suavizadas e interactivas)")
-    st.markdown("Cada gráfica muestra el entrenamiento (azul) y un solo método de pronóstico.")
-
     cols = st.columns(2)
     metodos_individuales = [
-        (pred_naive, "Ingenuo", 'green', "Repite el último valor observado"),
-        (pred_drift, "Deriva", 'orange', "Extiende la tendencia lineal"),
-        (pred_ma, f"Media móvil (w={window_ma})", 'red', f"Promedio de los últimos {window_ma} valores"),
-        (pred_mean, "Media", 'purple', "Promedio de todo el histórico"),
-        (pred_seasonal, f"Ing. Estacional (f={season})", 'brown', f"Repite el patrón de hace {season} periodos")
+        (pred_naive, "Ingenuo", 'green'),
+        (pred_drift, "Deriva", 'orange'),
+        (pred_ma, f"Media móvil (w={window_ma})", 'red'),
+        (pred_mean, "Media", 'purple'),
+        (pred_seasonal, f"Ing. Estacional (f={season})", 'brown')
     ]
-    for i, (pred, nombre, color, desc) in enumerate(metodos_individuales):
+    for i, (pred, nombre, color) in enumerate(metodos_individuales):
         with cols[i % 2]:
-            fig = go.Figure()
-            # Entrenamiento
-            fig.add_trace(go.Scatter(
-                x=tiempo_train, y=train,
-                mode='lines+markers', name='Entrenamiento (real)',
-                line=dict(color='blue', width=1), marker=dict(size=4),
-                hovertemplate='Periodo: %{x}<br>Valor real: %{y:.2f}<extra></extra>'
-            ))
-            # Suavizado del pronóstico (spline)
-            if len(tiempo_test) >= 4:
-                x_new = np.linspace(min(tiempo_test), max(tiempo_test), 100)
-                spl = interp.make_interp_spline(tiempo_test, pred, k=min(3, len(tiempo_test)-1))
-                y_smooth = spl(x_new)
+            with st.container(height=350):
+                fig = go.Figure()
+                # Entrenamiento
                 fig.add_trace(go.Scatter(
-                    x=x_new, y=y_smooth,
-                    mode='lines', name=f"{nombre} (suavizado)",
-                    line=dict(color=color, width=2, dash='dash'),
-                    hovertemplate=f'{nombre}<br>Periodo: %{{x:.1f}}<br>Valor: %{{y:.2f}}<extra></extra>'
+                    x=tiempo_train, y=train,
+                    mode='lines+markers', name='Entrenamiento (real)',
+                    line=dict(color='blue', width=1.5),
+                    marker=dict(size=2, opacity=0.5),
+                    hovertemplate='Periodo: %{x}<br>Valor real: %{y:.2f}<extra></extra>'
                 ))
-                fig.add_trace(go.Scatter(
-                    x=tiempo_test, y=pred,
-                    mode='markers', name=nombre,
-                    marker=dict(color=color, size=8, symbol='circle'),
-                    hovertemplate=f'{nombre}<br>Periodo: %{{x}}<br>Valor exacto: %{{y:.2f}}<extra></extra>'
-                ))
-            else:
-                fig.add_trace(go.Scatter(
-                    x=tiempo_test, y=pred,
-                    mode='lines+markers', name=nombre,
-                    line=dict(color=color, width=2),
-                    hovertemplate=f'{nombre}<br>Periodo: %{{x}}<br>Valor: %{{y:.2f}}<extra></extra>'
-                ))
-            fig.update_layout(
-                title=f"{nombre}",
-                xaxis_title="Tiempo",
-                yaxis_title=variable_objetivo,
-                hovermode="closest",
-                height=350
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption(f"💡 {desc}")
+                # Suavizado
+                if len(tiempo_test) >= 4:
+                    x_new = np.linspace(min(tiempo_test), max(tiempo_test), 100)
+                    spl = interp.make_interp_spline(tiempo_test, pred, k=min(3, len(tiempo_test)-1))
+                    y_smooth = spl(x_new)
+                    fig.add_trace(go.Scatter(
+                        x=x_new, y=y_smooth,
+                        mode='lines', name=f"{nombre} (suavizado)",
+                        line=dict(color=color, width=2, dash='dash'),
+                        hovertemplate=f'{nombre}<br>Periodo: %{{x:.1f}}<br>Valor: %{{y:.2f}}<extra></extra>'
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=tiempo_test, y=pred,
+                        mode='markers', name=nombre,
+                        marker=dict(color=color, size=8, symbol='circle'),
+                        hovertemplate=f'{nombre}<br>Periodo: %{{x}}<br>Valor exacto: %{{y:.2f}}<extra></extra>'
+                    ))
+                else:
+                    fig.add_trace(go.Scatter(
+                        x=tiempo_test, y=pred,
+                        mode='lines+markers', name=nombre,
+                        line=dict(color=color, width=2),
+                        hovertemplate=f'{nombre}<br>Periodo: %{{x}}<br>Valor: %{{y:.2f}}<extra></extra>'
+                    ))
+                fig.update_layout(title=nombre, xaxis_title="Tiempo", yaxis_title=variable_objetivo, 
+                                hovermode="closest", height=350)
+                st.plotly_chart(fig, width='stretch')
 
     # ==================================================
     # CONCLUSIÓN DEL MEJOR MÉTODO
@@ -413,7 +378,6 @@ with tab1:
     **Recomendación:** Utiliza este método como línea base para pronósticos futuros. 
     Si necesitas mayor precisión, considera modelos más avanzados (ARIMA, Suavizamiento exponencial, etc.).
     """)
-    
 # ------------------------------------------------------------------------------
 # VISTA 2: REGRESIÓN LINEAL (SIMPLE Y MÚLTIPLE)
 # ------------------------------------------------------------------------------
@@ -796,69 +760,152 @@ with tab2:
         st.info("No hay suficientes columnas para mostrar relación.")
 
     # ==================================================
-    # 8. MATRIZ DE CONFUSIÓN Y CLASIFICACIÓN
+    # 8. MATRIZ DE CONFUSIÓN BINARIA (ALTO vs BAJO)
     # ==================================================
-    st.subheader("8. Matriz de confusión y métricas de clasificación")
-    with st.expander("📖 ¿Cómo se obtiene una matriz de confusión a partir de regresión?", expanded=False):
-        st.markdown(r"""
-        Aunque la regresión predice valores continuos, podemos convertirla en un **clasificador** dividiendo la variable objetivo en categorías (por ejemplo, usando percentiles).
+    st.subheader("8. Matriz de confusión y métricas de clasificación (binaria)")
+    st.markdown("Clasificación binaria usando la mediana como punto de corte: **Alto** (positivo) y **Bajo** (negativo).")
 
-        **Pasos:**
-        1. Calcular los percentiles 33% y 66% de la variable objetivo (en los datos reales).
-        2. Clasificar cada valor real y predicho como:
-           - **Bajo** ≤ percentil 33%
-           - **Medio** entre percentil 33% y 66%
-           - **Alto** > percentil 66%
-        3. Construir la matriz de confusión comparando las clases reales vs predichas.
+    # Calcular mediana de la variable objetivo (sobre todos los datos de entrenamiento+prueba)
+    mediana = y.median()
+    
+    def convertir_binario(valor):
+        return "Alto (Positivo)" if valor > mediana else "Bajo (Negativo)"
+    
+    # Aplicar a valores reales y predichos del conjunto de prueba
+    y_test_bin = y_test.apply(convertir_binario)
+    y_pred_bin = pd.Series(y_pred).apply(convertir_binario)
+    
+    # Calcular matriz de confusión
+    from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score
+    cm = confusion_matrix(y_test_bin, y_pred_bin, labels=["Alto (Positivo)", "Bajo (Negativo)"])
+    
+    # Extraer valores
+    VP = cm[0,0]  # Verdaderos Positivos (Alto predicho como Alto)
+    FP = cm[0,1]  # Falsos Positivos (Bajo predicho como Alto)
+    FN = cm[1,0]  # Falsos Negativos (Alto predicho como Bajo)
+    VN = cm[1,1]  # Verdaderos Negativos (Bajo predicho como Bajo)
+    
+    # Métricas
+    accuracy = (VP + VN) / (VP + FP + FN + VN)
+    precision = VP / (VP + FP) if (VP + FP) > 0 else 0
+    recall = VP / (VP + FN) if (VP + FN) > 0 else 0          # Sensibilidad
+    specificity = VN / (VN + FP) if (VN + FP) > 0 else 0      # Tasa verdaderos negativos
+    vpp = VP / (VP + FP) if (VP + FP) > 0 else 0              # Valor predictivo positivo (igual a precisión)
+    vpn = VN / (VN + FN) if (VN + FN) > 0 else 0              # Valor predictivo negativo
+    tasa_falsos_positivos = FP / (FP + VN) if (FP + VN) > 0 else 0
+    tasa_falsos_negativos = FN / (FN + VP) if (FN + VP) > 0 else 0
+    
+    # Mostrar matriz de confusión con heatmap
+    fig_cm, ax_cm = plt.subplots(figsize=(5, 4))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=["Alto (Positivo)", "Bajo (Negativo)"],
+                yticklabels=["Alto (Positivo)", "Bajo (Negativo)"], ax=ax_cm)
+    ax_cm.set_xlabel("Predicción")
+    ax_cm.set_ylabel("Valor real")
+    ax_cm.set_title("Matriz de confusión")
+    st.pyplot(fig_cm)
+    
+    # Mostrar métricas en formato tabla interpretativa (como la imagen)
+    st.markdown("### Métricas de rendimiento")
+    
+    # Crear un DataFrame con las métricas y su interpretación
+    metricas_df = pd.DataFrame({
+        "Métrica": [
+            "Exactitud (Accuracy)", 
+            "Precisión (Precision)", 
+            "Sensibilidad (Recall)", 
+            "Especificidad (Specificity)", 
+            "Valor predictivo positivo (VPP)", 
+            "Valor predictivo negativo (VPN)", 
+            "Tasa de falsos positivos", 
+            "Tasa de falsos negativos"
+        ],
+        "Valor": [
+            f"{accuracy:.2%}", 
+            f"{precision:.2%}", 
+            f"{recall:.2%}", 
+            f"{specificity:.2%}", 
+            f"{vpp:.2%}", 
+            f"{vpn:.2%}", 
+            f"{tasa_falsos_positivos:.2%}", 
+            f"{tasa_falsos_negativos:.2%}"
+        ],
+        "Interpretación": [
+            f"Proporción de aciertos totales: {(VP+VN)} / {VP+FP+FN+VN} = {accuracy:.2%}",
+            f"De las predicciones 'Alto', cuántas fueron correctas: VP / (VP+FP) = {precision:.2%}",
+            f"De los valores 'Alto' reales, cuántos fueron detectados: VP / (VP+FN) = {recall:.2%}",
+            f"De los valores 'Bajo' reales, cuántos fueron detectados: VN / (VN+FP) = {specificity:.2%}",
+            f"Probabilidad de que un 'Alto' predicho sea realmente 'Alto': {precision:.2%}",
+            f"Probabilidad de que un 'Bajo' predicho sea realmente 'Bajo': {vpn:.2%}",
+            f"Proporción de 'Bajo' reales clasificados como 'Alto': FP / (FP+VN) = {tasa_falsos_positivos:.2%}",
+            f"Proporción de 'Alto' reales clasificados como 'Bajo': FN / (FN+VP) = {tasa_falsos_negativos:.2%}"
+        ]
+    })
+    
+    st.dataframe(metricas_df, use_container_width=True)
+    
+    # Interpretación adicional (como la imagen)
+    st.markdown("#### 📌 Interpretación de la matriz")
+    st.info(f"""
+    - **Punto de corte**: Se usó la mediana de {variable_objetivo} = {mediana:.2f}.
+    - **Clase positiva (Alto)**: > {mediana:.2f}
+    - **Clase negativa (Bajo)**: ≤ {mediana:.2f}
+    
+    **Resumen**:
+    - El modelo acierta en el **{accuracy:.1%}** de los casos (Exactitud).
+    - Cuando predice "Alto", acierta el **{precision:.1%}** de las veces (Precisión).
+    - Detecta el **{recall:.1%}** de los "Alto" reales (Sensibilidad).
+    - Detecta el **{specificity:.1%}** de los "Bajo" reales (Especificidad).
+    """)
+    
+    # ==================================================
+    # 9. PREDICCIÓN MANUAL CON NUEVOS DATOS
+    # ==================================================
+    st.subheader("9. Predicción manual con nuevos datos")
+    st.markdown("Ingresa valores para las variables predictoras y obtén una estimación de la variable objetivo.")
 
-        **Métricas:**
-        - **Accuracy:** (verdaderos positivos + verdaderos negativos) / total
-        - **Precision:** proporción de predicciones positivas que fueron correctas
-        - **Recall (sensibilidad):** proporción de positivos reales que fueron detectados
-        - **F1-score:** media armónica de precisión y recall
-        """)
-
-    # Convertir variable objetivo numérica a categorías
-    q1 = y.quantile(0.33)
-    q2 = y.quantile(0.66)
-
-    def convertir_categoria(valor):
-        if valor <= q1:
-            return "Bajo"
-        elif valor <= q2:
-            return "Medio"
-        else:
-            return "Alto"
-
-    y_test_cat = y_test.apply(convertir_categoria)
-    y_pred_cat = pd.Series(y_pred).apply(convertir_categoria)
-
-    from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
-
-    matriz = confusion_matrix(y_test_cat, y_pred_cat, labels=["Bajo", "Medio", "Alto"])
-    accuracy = accuracy_score(y_test_cat, y_pred_cat)
-    precision = precision_score(y_test_cat, y_pred_cat, average="weighted", zero_division=0)
-    recall = recall_score(y_test_cat, y_pred_cat, average="weighted", zero_division=0)
-    f1 = f1_score(y_test_cat, y_pred_cat, average="weighted", zero_division=0)
-
-    col_m1, col_m2 = st.columns(2)
-    with col_m1:
-        fig_cm, ax_cm = plt.subplots(figsize=(5, 4))
-        sns.heatmap(matriz, annot=True, fmt="d", cmap="Blues",
-                    xticklabels=["Bajo", "Medio", "Alto"],
-                    yticklabels=["Bajo", "Medio", "Alto"], ax=ax_cm)
-        ax_cm.set_xlabel("Predicción")
-        ax_cm.set_ylabel("Valor real")
-        ax_cm.set_title("Matriz de confusión")
-        st.pyplot(fig_cm)
-    with col_m2:
-        st.metric("Accuracy", f"{accuracy:.2f}")
-        st.metric("Precision", f"{precision:.2f}")
-        st.metric("Recall", f"{recall:.2f}")
-        st.metric("F1-score", f"{f1:.2f}")
-
-    st.caption(f"Nota: Se clasificó en tres grupos usando percentiles 33% y 66% de {variable_objetivo} (Bajo ≤ {q1:.2f}, Medio ≤ {q2:.2f}, Alto > {q2:.2f}).")
-
+    # Determinar número de columnas (por ejemplo, 3 columnas)
+    num_columnas = 3
+    cols = st.columns(num_columnas)
+    
+    with st.form(key="prediccion_form"):
+        entrada_usuario = {}
+        
+        # Asignar cada variable predictora a una columna de forma cíclica
+        for i, col in enumerate(variables_predictoras):
+            with cols[i % num_columnas]:
+                if col in num_features:
+                    # Variable numérica
+                    valor_default = float(datos[col].mean())
+                    entrada_usuario[col] = st.number_input(
+                        f"**{col}**", 
+                        value=valor_default, 
+                        format="%.2f",
+                        key=f"num_{col}"
+                    )
+                elif col in cat_features:
+                    # Variable categórica
+                    valor_default = datos[col].mode()[0]
+                    opciones = datos[col].dropna().unique().tolist()
+                    entrada_usuario[col] = st.selectbox(
+                        f"**{col}**", 
+                        opciones,
+                        index=opciones.index(valor_default) if valor_default in opciones else 0,
+                        key=f"cat_{col}"
+                    )
+        
+        # Botón de envío (centrado)
+        col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
+        with col_btn2:
+            submitted = st.form_submit_button("🔮 Realizar predicción", use_container_width=True)
+        
+        if submitted:
+            nuevo_dato = pd.DataFrame([entrada_usuario])
+            prediccion = modelo.predict(nuevo_dato)[0]
+            st.success(f"### 📈 Estimación de **{variable_objetivo}**: {prediccion:,.2f}")
+            with st.expander("Ver valores ingresados"):
+                st.dataframe(nuevo_dato, use_container_width=True)
+                
      # ==================================================
     # CONCLUSIONES GENERALES DE REGRESIÓN
     # ==================================================
